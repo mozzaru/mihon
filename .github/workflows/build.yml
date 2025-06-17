@@ -28,5 +28,5 @@ jobs:
     - name: Upload APK
       uses: actions/upload-artifact@main
       with:
-        name: "kahon_${{ env.MIHON_VERSION }}-github-release"
+        name: "mihon_new_${{ env.MIHON_VERSION }}-github-release"
         path: ./app/build/outputs/apk/release/app-release-unsigned.apk
