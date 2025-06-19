@@ -239,6 +239,8 @@ dependencies {
     implementation(libs.leakcanary.plumber)
 
     testImplementation(kotlinx.coroutines.test)
+    
+    implementation(me.marplex.cloudflarebypass:cloudflare-bypass:1.1)
 }
 
 buildscript {
