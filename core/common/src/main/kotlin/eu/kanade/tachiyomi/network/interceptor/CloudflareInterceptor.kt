@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.network.interceptor
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.util.Log
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -11,11 +12,15 @@ import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.network.AndroidCookieJar
 import eu.kanade.tachiyomi.util.system.isOutdated
 import eu.kanade.tachiyomi.util.system.setDefaultSettings
+import eu.kanade.tachiyomi.network.helper.bypassCloudflareWithSearch
 import eu.kanade.tachiyomi.util.system.toast
+import kotlinx.coroutines.runBlocking
+import me.marplex.cloudflarebypass.CloudflareBypass
 import okhttp3.Cookie
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
@@ -28,7 +33,8 @@ import java.util.concurrent.TimeUnit
 class CloudflareInterceptor(
     private val context: Context,
     private val cookieManager: AndroidCookieJar,
-    defaultUserAgentProvider: () -> String,
+    private val defaultUserAgentProvider: () -> String,
+    private val client: OkHttpClient, // for Marplex
 ) : WebViewInterceptor(context, defaultUserAgentProvider) {
 
     private val executor = ContextCompat.getMainExecutor(context)
@@ -39,65 +45,61 @@ class CloudflareInterceptor(
         if (!SERVER_CHECK.any { serverHeader.contains(it, ignoreCase = true) }) return false
 
         val body = response.peekBody(Long.MAX_VALUE).string()
-        val document = Jsoup.parse(body, response.request.url.toString())
+        val doc = Jsoup.parse(body, response.request.url.toString())
 
-        val hasChallengeElements = listOf(
-            document.selectFirst("form[action*=\"challenge\"]"),
-            document.selectFirst("script[data-type=\"challenge-form\"]"),
-            document.selectFirst("#challenge-form"),
-            document.getElementById("challenge-error-title"),
-            document.getElementById("challenge-error-text")
+        val challenge = listOf(
+            doc.selectFirst("form[action*=\"challenge\"]"),
+            doc.selectFirst("script[data-type=\"challenge-form\"]"),
+            doc.selectFirst("#challenge-form"),
+            doc.getElementById("challenge-error-title"),
+            doc.getElementById("challenge-error-text")
         ).any { it != null }
 
-        val containsChallengeJs = document.select("script")
-            .any { it.html().contains("setTimeout") && it.html().contains("challenge-form") }
+        val jsChallenge = doc.select("script").any {
+            it.html().contains("setTimeout") && it.html().contains("challenge-form")
+        }
 
-        val containsNoscriptMetaRefresh = document.select("noscript meta[http-equiv=refresh]").isNotEmpty()
+        val metaRefresh = doc.select("noscript meta[http-equiv=refresh]").isNotEmpty()
+        val formCount = doc.select("form").size
+        val bodyLen = body.length
 
-        val formCount = document.select("form").size
-        val bodyLength = body.length
-
-        return hasChallengeElements ||
-               containsChallengeJs ||
-               containsNoscriptMetaRefresh ||
-               (formCount == 1 && bodyLength < 20_000)
+        return challenge || jsChallenge || metaRefresh || (formCount == 1 && bodyLen < 20_000)
     }
 
     override fun intercept(chain: Interceptor.Chain, request: Request, response: Response): Response {
-        try {
-            val url = request.url
+        val url = request.url
+        if (hasValidClearanceCookie(url)) {
+            response.close()
+            return chain.proceed(request)
+        }
 
-            // Cek apakah sudah punya cf_clearance yang valid
-            if (hasValidClearanceCookie(url)) {
-                response.close()
-                return chain.proceed(request)
+        response.close()
+        cookieManager.remove(url, COOKIE_NAMES, 0)
+
+        // ⚡ Otomatis Bypass dengan Marplex
+        try {
+            val bypass = CloudflareBypass(client)
+            val bypassedResponse = runBlocking {
+                bypass.requestWithBypass(request)
             }
 
-            response.close()
-
-            // Hapus cookie cf_clearance lama
-            cookieManager.remove(url, COOKIE_NAMES, 0)
-
-            val oldCookie = cookieManager.get(url)
-                .firstOrNull { it.name == "cf_clearance" }
-
-            resolveWithWebView(request, oldCookie)
-
-            return chain.proceed(request)
-        } catch (e: CloudflareBypassException) {
-            throw IOException(context.stringResource(MR.strings.information_cloudflare_bypass_failure), e)
+            if (bypassedResponse.code == 200 && hasValidClearanceCookie(url)) {
+                return bypassedResponse
+            }
         } catch (e: Exception) {
-            throw IOException(e)
+            Log.w("CloudflareInterceptor", "Marplex bypass failed: ${e.message}")
         }
+
+        // 🧱 Jika gagal, fallback ke WebView
+        val oldCookie = cookieManager.get(url).firstOrNull { it.name == "cf_clearance" }
+        resolveWithWebView(request, oldCookie)
+        return chain.proceed(request)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun resolveWithWebView(originalRequest: Request, oldCookie: Cookie?) {
         val latch = CountDownLatch(1)
-
         var webview: WebView? = null
-
-        var challengeFound = false
         var cloudflareBypassed = false
         var isWebViewOutdated = false
 
@@ -105,26 +107,15 @@ class CloudflareInterceptor(
         val headers = parseHeaders(originalRequest.headers)
 
         executor.execute {
-            webview = createWebView(originalRequest).apply {
-                // Pastikan setDefaultSettings aktif (aktifkan JS, dsb)
-                setDefaultSettings()
-            }
+            webview = createWebView(originalRequest).apply { setDefaultSettings() }
 
             webview?.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String) {
-                    fun isCloudFlareBypassed(): Boolean {
-                        return cookieManager.get(origRequestUrl.toHttpUrl())
-                            .firstOrNull { it.name == "cf_clearance" }
-                            .let { it != null && it != oldCookie && !it.hasExpired() }
-                    }
+                    val cookie = cookieManager.get(origRequestUrl.toHttpUrl())
+                        .firstOrNull { it.name == "cf_clearance" }
 
-                    if (isCloudFlareBypassed()) {
+                    if (cookie != null && cookie != oldCookie && !cookie.hasExpired()) {
                         cloudflareBypassed = true
-                        latch.countDown()
-                    }
-
-                    if (url == origRequestUrl && !challengeFound) {
-                        // Challenge tidak ditemukan, unlock thread
                         latch.countDown()
                     }
                 }
@@ -134,12 +125,10 @@ class CloudflareInterceptor(
                     request: WebResourceRequest?,
                     errorResponse: WebResourceResponse?,
                 ) {
-                    if (request?.isForMainFrame == true) {
-                        if (errorResponse?.statusCode in ERROR_CODES) {
-                            challengeFound = true
-                        } else {
-                            latch.countDown()
-                        }
+                    if (request?.isForMainFrame == true &&
+                        errorResponse?.statusCode !in ERROR_CODES
+                    ) {
+                        latch.countDown()
                     }
                 }
             }
@@ -161,21 +150,26 @@ class CloudflareInterceptor(
         }
 
         if (!cloudflareBypassed) {
-            if (isWebViewOutdated) {
-                context.toast(MR.strings.information_webview_outdated, Toast.LENGTH_LONG)
+            try {
+                bypassCloudflareWithSearch(context, cookieManager, origRequestUrl)
+            } catch (e: Exception) {
+                if (isWebViewOutdated) {
+                    context.toast(MR.strings.information_webview_outdated, Toast.LENGTH_LONG)
+                }
+                throw CloudflareBypassException()
             }
-            throw CloudflareBypassException()
         }
     }
 
     private fun hasValidClearanceCookie(url: HttpUrl): Boolean {
-        val cookie = cookieManager.get(url)
-            .firstOrNull { it.name == "cf_clearance" }
+        val cookie = cookieManager.get(url).firstOrNull { it.name == "cf_clearance" }
         return cookie != null && !cookie.hasExpired()
     }
+
+    private class CloudflareBypassException : Exception()
 }
 
-// Extension function untuk cek expired cookie
+// Extension untuk cek expired
 private fun Cookie.hasExpired(): Boolean {
     return expiresAt < System.currentTimeMillis()
 }
@@ -183,5 +177,3 @@ private fun Cookie.hasExpired(): Boolean {
 private val ERROR_CODES = listOf(403, 503)
 private val SERVER_CHECK = arrayOf("cloudflare-nginx", "cloudflare")
 private val COOKIE_NAMES = listOf("cf_clearance")
-
-private class CloudflareBypassException : Exception()
