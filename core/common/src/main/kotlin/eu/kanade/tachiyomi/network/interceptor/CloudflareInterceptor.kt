@@ -14,8 +14,6 @@ import eu.kanade.tachiyomi.util.system.isOutdated
 import eu.kanade.tachiyomi.util.system.setDefaultSettings
 import eu.kanade.tachiyomi.network.helper.bypassCloudflareWithSearch
 import eu.kanade.tachiyomi.util.system.toast
-import kotlinx.coroutines.runBlocking
-import me.marplex.cloudflarebypass.CloudflareBypass
 import okhttp3.Cookie
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -24,9 +22,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
-import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
-import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -34,7 +30,7 @@ class CloudflareInterceptor(
     private val context: Context,
     private val cookieManager: AndroidCookieJar,
     private val defaultUserAgentProvider: () -> String,
-    private val client: OkHttpClient, // for Marplex
+    private val client: OkHttpClient,
 ) : WebViewInterceptor(context, defaultUserAgentProvider) {
 
     private val executor = ContextCompat.getMainExecutor(context)
@@ -69,28 +65,16 @@ class CloudflareInterceptor(
     override fun intercept(chain: Interceptor.Chain, request: Request, response: Response): Response {
         val url = request.url
         if (hasValidClearanceCookie(url)) {
+            Log.d("CloudflareInterceptor", "cf_clearance valid, proceeding without bypass")
             response.close()
             return chain.proceed(request)
         }
 
+        Log.d("CloudflareInterceptor", "cf_clearance missing or expired, attempting bypass")
         response.close()
-        cookieManager.remove(url, COOKIE_NAMES, 0)
+        cookieManager.remove(url, listOf("cf_clearance"), 0)
 
-        // ⚡ Otomatis Bypass dengan Marplex
-        try {
-            val bypass = CloudflareBypass(client)
-            val bypassedResponse = runBlocking {
-                bypass.requestWithBypass(request)
-            }
-
-            if (bypassedResponse.code == 200 && hasValidClearanceCookie(url)) {
-                return bypassedResponse
-            }
-        } catch (e: Exception) {
-            Log.w("CloudflareInterceptor", "Marplex bypass failed: ${e.message}")
-        }
-
-        // 🧱 Jika gagal, fallback ke WebView
+        Log.d("CloudflareInterceptor", "Fallback to visible WebView UI")
         val oldCookie = cookieManager.get(url).firstOrNull { it.name == "cf_clearance" }
         resolveWithWebView(request, oldCookie)
         return chain.proceed(request)
@@ -115,6 +99,7 @@ class CloudflareInterceptor(
                         .firstOrNull { it.name == "cf_clearance" }
 
                     if (cookie != null && cookie != oldCookie && !cookie.hasExpired()) {
+                        Log.d("CloudflareInterceptor", "cf_clearance obtained via visible WebView: ${cookie.value}")
                         cloudflareBypassed = true
                         latch.countDown()
                     }
@@ -151,11 +136,13 @@ class CloudflareInterceptor(
 
         if (!cloudflareBypassed) {
             try {
+                Log.w("CloudflareInterceptor", "WebView UI failed, trying bypassCloudflareWithSearch")
                 bypassCloudflareWithSearch(context, cookieManager, origRequestUrl)
             } catch (e: Exception) {
                 if (isWebViewOutdated) {
                     context.toast(MR.strings.information_webview_outdated, Toast.LENGTH_LONG)
                 }
+                Log.e("CloudflareInterceptor", "All Cloudflare bypass methods failed")
                 throw CloudflareBypassException()
             }
         }
@@ -163,17 +150,17 @@ class CloudflareInterceptor(
 
     private fun hasValidClearanceCookie(url: HttpUrl): Boolean {
         val cookie = cookieManager.get(url).firstOrNull { it.name == "cf_clearance" }
-        return cookie != null && !cookie.hasExpired()
+        val valid = cookie != null && !cookie.hasExpired()
+        Log.d("CloudflareInterceptor", "hasValidClearanceCookie for ${url.host}: $valid")
+        return valid
     }
 
     private class CloudflareBypassException : Exception()
 }
 
-// Extension untuk cek expired
-private fun Cookie.hasExpired(): Boolean {
-    return expiresAt < System.currentTimeMillis()
+fun Cookie.hasExpired(): Boolean {
+    return this.expiresAt < System.currentTimeMillis()
 }
 
 private val ERROR_CODES = listOf(403, 503)
 private val SERVER_CHECK = arrayOf("cloudflare-nginx", "cloudflare")
-private val COOKIE_NAMES = listOf("cf_clearance")
