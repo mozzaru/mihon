@@ -26,41 +26,52 @@ abstract class WebViewInterceptor(
 ) : Interceptor {
 
     /**
-     * When this is called, it initializes the WebView if it wasn't already. We use this to avoid
-     * blocking the main thread too much. If used too often we could consider moving it to the
-     * Application class.
+     * Menginisialisasi WebView jika diperlukan.
+     * Menghindari crash atau bug pada perangkat MIUI atau Samsung dengan Android 12.
      */
     private val initWebView by lazy {
-        Log.d("CloudflareInterceptor", "Initializing WebView")
-        if (DeviceUtil.isMiui || Build.VERSION.SDK_INT == Build.VERSION_CODES.S && DeviceUtil.isSamsung) {
-            Log.d("CloudflareInterceptor", "Skipping WebView init on MIUI/Samsung Android 12 device")
+        Log.d("CloudflareInterceptor", "Initializing WebView...")
+
+        if (DeviceUtil.isMiui || (Build.VERSION.SDK_INT == Build.VERSION_CODES.S && DeviceUtil.isSamsung)) {
+            Log.w("CloudflareInterceptor", "WebView initialization skipped on MIUI/Samsung Android 12")
             return@lazy
         }
 
         try {
             WebSettings.getDefaultUserAgent(context)
-            Log.d("CloudflareInterceptor", "WebView default user-agent obtained")
+            Log.d("CloudflareInterceptor", "WebView user-agent initialized")
         } catch (e: Exception) {
-            Log.w("WebViewInterceptor", "Failed to get default user-agent: ${e.message}")
+            Log.e("WebViewInterceptor", "Failed to initialize user-agent: ${e.message}")
         }
     }
 
+    /**
+     * Menentukan apakah respon perlu di-intercept untuk bypass Cloudflare.
+     */
     abstract fun shouldIntercept(response: Response): Boolean
 
+    /**
+     * Dipanggil jika Cloudflare challenge terdeteksi.
+     * Implementasi disediakan oleh subclass (misalnya CloudflareInterceptor).
+     */
     abstract fun intercept(chain: Interceptor.Chain, request: Request, response: Response): Response
 
+    /**
+     * Interceptor utama untuk menangani respon dan meneruskan jika bypass diperlukan.
+     */
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val response = chain.proceed(request)
-        Log.d("CloudflareInterceptor", "Intercepting request to ${request.url}")
+
+        Log.d("CloudflareInterceptor", "Checking response from: ${request.url}")
 
         if (!shouldIntercept(response)) {
-            Log.d("CloudflareInterceptor", "No interception needed for ${request.url}")
+            Log.d("CloudflareInterceptor", "Bypass not needed for: ${request.url}")
             return response
         }
 
         if (!WebViewUtil.supportsWebView(context)) {
-            Log.w("WebViewInterceptor", "WebView not supported on device")
+            Log.w("WebViewInterceptor", "WebView not supported on this device")
             launchUI {
                 context.toast(MR.strings.information_webview_required, Toast.LENGTH_LONG)
             }
@@ -68,43 +79,56 @@ abstract class WebViewInterceptor(
         }
 
         initWebView
-        Log.d("CloudflareInterceptor", "Delegating to WebView-based interception")
+        Log.d("CloudflareInterceptor", "Delegating to WebView-based Cloudflare bypass")
         return intercept(chain, request, response)
     }
 
-    fun parseHeaders(headers: Headers): Map<String, String> {
-        return headers
-            .filter { (name, value) ->
-                isRequestHeaderSafe(name, value)
-            }
-            .groupBy(keySelector = { (name, _) -> name }) { (_, value) -> value }
-            .mapValues { it.value.getOrNull(0).orEmpty() }
-    }
-
-    fun CountDownLatch.awaitFor30Seconds() {
-        Log.d("CloudflareInterceptor", "Awaiting latch for up to 30 seconds")
-        await(30, TimeUnit.SECONDS)
-    }
-
+    /**
+     * Membuat WebView dengan pengaturan default dan user-agent sesuai header.
+     */
     fun createWebView(request: Request): WebView {
-        return WebView(context).apply {
+        return WebView(context.applicationContext).apply {
             setDefaultSettings()
             val userAgent = request.header("User-Agent") ?: defaultUserAgentProvider()
             settings.userAgentString = userAgent
             Log.d("CloudflareInterceptor", "Created WebView with UA: $userAgent")
         }
     }
+
+    /**
+     * Menyaring header yang aman untuk digunakan dalam WebView.
+     */
+    fun parseHeaders(headers: Headers): Map<String, String> {
+        return headers
+            .filter { (name, value) -> isRequestHeaderSafe(name, value) }
+            .groupBy(keySelector = { (name, _) -> name }) { (_, value) -> value }
+            .mapValues { (_, values) -> values.firstOrNull().orEmpty() }
+    }
+
+    /**
+     * Menunggu hingga 30 detik dalam operasi blocking menggunakan latch.
+     */
+    fun CountDownLatch.awaitFor30Seconds() {
+        Log.d("CloudflareInterceptor", "Waiting for WebView result (30s max)")
+        await(30, TimeUnit.SECONDS)
+    }
 }
 
-// Based on [IsRequestHeaderSafe] in
-// https://source.chromium.org/chromium/chromium/src/+/main:services/network/public/cpp/header_util.cc
+/**
+ * Berdasarkan Chromium header sanitizer.
+ * Mencegah header berbahaya digunakan saat memuat WebView.
+ */
 private fun isRequestHeaderSafe(_name: String, _value: String): Boolean {
     val name = _name.lowercase(Locale.ENGLISH)
     val value = _value.lowercase(Locale.ENGLISH)
+
     if (name in unsafeHeaderNames || name.startsWith("proxy-")) return false
     if (name == "connection" && value == "upgrade") return false
+
     return true
 }
+
 private val unsafeHeaderNames = listOf(
-    "content-length", "host", "trailer", "te", "upgrade", "cookie2", "keep-alive", "transfer-encoding", "set-cookie",
+    "content-length", "host", "trailer", "te", "upgrade", "cookie2",
+    "keep-alive", "transfer-encoding", "set-cookie",
 )
