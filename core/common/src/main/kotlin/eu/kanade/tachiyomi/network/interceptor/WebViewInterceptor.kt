@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.network.interceptor
 
 import android.content.Context
 import android.os.Build
+import android.util.Log
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.widget.Toast
@@ -30,17 +31,17 @@ abstract class WebViewInterceptor(
      * Application class.
      */
     private val initWebView by lazy {
-        // Crashes on some devices. We skip this in some cases since the only impact is slower
-        // WebView init in those rare cases.
-        // See https://bugs.chromium.org/p/chromium/issues/detail?id=1279562
+        Log.d("CloudflareInterceptor", "Initializing WebView")
         if (DeviceUtil.isMiui || Build.VERSION.SDK_INT == Build.VERSION_CODES.S && DeviceUtil.isSamsung) {
+            Log.d("CloudflareInterceptor", "Skipping WebView init on MIUI/Samsung Android 12 device")
             return@lazy
         }
 
         try {
             WebSettings.getDefaultUserAgent(context)
-        } catch (_: Exception) {
-            // Avoid some crashes like when Chrome/WebView is being updated.
+            Log.d("CloudflareInterceptor", "WebView default user-agent obtained")
+        } catch (e: Exception) {
+            Log.w("WebViewInterceptor", "Failed to get default user-agent: ${e.message}")
         }
     }
 
@@ -51,24 +52,28 @@ abstract class WebViewInterceptor(
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val response = chain.proceed(request)
+        Log.d("CloudflareInterceptor", "Intercepting request to ${request.url}")
+
         if (!shouldIntercept(response)) {
+            Log.d("CloudflareInterceptor", "No interception needed for ${request.url}")
             return response
         }
 
         if (!WebViewUtil.supportsWebView(context)) {
+            Log.w("WebViewInterceptor", "WebView not supported on device")
             launchUI {
                 context.toast(MR.strings.information_webview_required, Toast.LENGTH_LONG)
             }
             return response
         }
-        initWebView
 
+        initWebView
+        Log.d("CloudflareInterceptor", "Delegating to WebView-based interception")
         return intercept(chain, request, response)
     }
 
     fun parseHeaders(headers: Headers): Map<String, String> {
         return headers
-            // Keeping unsafe header makes webview throw [net::ERR_INVALID_ARGUMENT]
             .filter { (name, value) ->
                 isRequestHeaderSafe(name, value)
             }
@@ -77,14 +82,16 @@ abstract class WebViewInterceptor(
     }
 
     fun CountDownLatch.awaitFor30Seconds() {
+        Log.d("CloudflareInterceptor", "Awaiting latch for up to 30 seconds")
         await(30, TimeUnit.SECONDS)
     }
 
     fun createWebView(request: Request): WebView {
         return WebView(context).apply {
             setDefaultSettings()
-            // Avoid sending empty User-Agent, Chromium WebView will reset to default if empty
-            settings.userAgentString = request.header("User-Agent") ?: defaultUserAgentProvider()
+            val userAgent = request.header("User-Agent") ?: defaultUserAgentProvider()
+            settings.userAgentString = userAgent
+            Log.d("CloudflareInterceptor", "Created WebView with UA: $userAgent")
         }
     }
 }

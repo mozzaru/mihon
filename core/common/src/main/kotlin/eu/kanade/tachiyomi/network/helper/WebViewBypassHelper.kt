@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.core.content.ContextCompat
@@ -18,6 +19,8 @@ fun bypassCloudflareWithSearch(context: Context, cookieJar: AndroidCookieJar, ur
     val latch = CountDownLatch(1)
     val mainExecutor = ContextCompat.getMainExecutor(context)
 
+    Log.d("CloudflareInterceptor", "Starting bypass via search injection at $url")
+
     mainExecutor.execute {
         val webView = WebView(context)
         webView.settings.javaScriptEnabled = true
@@ -27,14 +30,14 @@ fun bypassCloudflareWithSearch(context: Context, cookieJar: AndroidCookieJar, ur
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
-                println("Page loaded: $url")
+                Log.d("CloudflareInterceptor", "Page loaded: $url")
 
                 val js = """
                     (function() {
                         var icon = document.querySelector('.search-icon, .ion-ios-search-strong');
                         if(icon) icon.click();
 
-                        var input = document.querySelector('input[name="s"]');
+                        var input = document.querySelector('input[name=\"s\"]');
                         if(input) {
                             input.value = 'test';
                             var form = input.closest('form');
@@ -44,14 +47,16 @@ fun bypassCloudflareWithSearch(context: Context, cookieJar: AndroidCookieJar, ur
                 """.trimIndent()
 
                 view.evaluateJavascript(js) { result ->
-                    println("JS executed: $result")
+                    Log.d("CloudflareInterceptor", "JS executed: $result")
                     Handler(Looper.getMainLooper()).postDelayed({
+                        Log.d("CloudflareInterceptor", "Waiting complete after JS execution")
                         latch.countDown()
                     }, 8000)
                 }
             }
         }
 
+        Log.d("CloudflareInterceptor", "Loading page in WebView: $url")
         webView.loadUrl(url)
     }
 
@@ -60,9 +65,9 @@ fun bypassCloudflareWithSearch(context: Context, cookieJar: AndroidCookieJar, ur
     val cookies = cookieJar.get(url.toHttpUrl())
     val cfCookie = cookies.firstOrNull { it.name == "cf_clearance" }
     if (cfCookie != null && !cfCookie.hasExpired()) {
-        println("✅ cf_clearance cookie didapatkan: ${cfCookie.value}")
+        Log.d("CloudflareInterceptor", "✅ cf_clearance obtained: ${cfCookie.value}")
     } else {
-        println("❌ Gagal dapat cookie cf_clearance")
+        Log.e("BypassSearch", "❌ Failed to obtain cf_clearance cookie")
         throw Exception("Gagal bypass Cloudflare challenge")
     }
 }
