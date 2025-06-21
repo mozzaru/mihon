@@ -19,6 +19,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -26,6 +30,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -54,6 +60,7 @@ import eu.kanade.tachiyomi.ui.webview.WebViewScreen
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 import mihon.feature.migration.dialog.MigrateMangaDialog
 import mihon.presentation.core.util.collectAsLazyPagingItems
 import tachiyomi.core.common.Constants
@@ -77,10 +84,19 @@ data class BrowseSourceScreen(
 
     @Composable
     override fun Content() {
+        var showCustomUrlDialog by remember { mutableStateOf(false) }
+        var customUrl by remember { mutableStateOf("") }
+        
         if (!ifSourcesLoaded()) {
             LoadingScreen()
             return
         }
+                
+        val openLabel = stringResource(MR.strings.custom_link_open)
+        val cancelLabel = stringResource(MR.strings.action_cancel)
+        val urlLabel = stringResource(MR.strings.custom_link_label)
+        val urlPlaceholder = stringResource(MR.strings.custom_link_placeholder)
+        val invalidUrlMsg = stringResource(MR.strings.invalid_url)
 
         val screenModel = rememberScreenModel { BrowseSourceScreenModel(sourceId, listingQuery) }
         val state by screenModel.state.collectAsState()
@@ -140,6 +156,7 @@ data class BrowseSourceScreen(
                         onHelpClick = onHelpClick,
                         onSettingsClick = { navigator.push(SourcePreferencesScreen(sourceId)) },
                         onSearch = screenModel::search,
+                        onCustomLinkClick = { showCustomUrlDialog = true },
                     )
 
                     Row(
@@ -208,7 +225,7 @@ data class BrowseSourceScreen(
                     HorizontalDivider()
                 }
             },
-            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },            
         ) { paddingValues ->
             BrowseSourceContent(
                 source = screenModel.source,
@@ -234,6 +251,43 @@ data class BrowseSourceScreen(
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     }
                 },
+            )
+        }
+        
+        if (showCustomUrlDialog) {
+            AlertDialog(
+                onDismissRequest = { showCustomUrlDialog = false },
+                title = { Text(stringResource(MR.strings.action_custom_link)) },
+                text = {
+                    TextField(
+                        value = customUrl,
+                        onValueChange = { customUrl = it },
+                        label = { Text(urlLabel) },
+                        singleLine = true,
+                        placeholder = { Text(urlPlaceholder) },
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showCustomUrlDialog = false
+                            if (customUrl.startsWith("http://") || customUrl.startsWith("https://")) {
+                                navigator.push(WebViewScreen(url = customUrl))
+                            } else {
+                                scope.launch {
+                                    snackbarHostState.showSnackbar(invalidUrlMsg)
+                                }
+                            }
+                        }
+                    ) {
+                        Text(openLabel)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showCustomUrlDialog = false }) {
+                        Text(cancelLabel)
+                    }
+                }
             )
         }
 

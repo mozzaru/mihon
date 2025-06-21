@@ -37,6 +37,7 @@ fun BrowseSourceToolbar(
     onSettingsClick: () -> Unit,
     onSearch: (String) -> Unit,
     scrollBehavior: TopAppBarScrollBehavior? = null,
+    onCustomLinkClick: () -> Unit,
 ) {
     // Avoid capturing unstable source in actions lambda
     val title = source?.name
@@ -56,6 +57,12 @@ fun BrowseSourceToolbar(
             AppBarActions(
                 actions = persistentListOf<AppBar.AppBarAction>().builder()
                     .apply {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.custom_link_title),
+                                onClick = onCustomLinkClick,
+                            ),
+                        )
                         add(
                             AppBar.Action(
                                 title = stringResource(MR.strings.action_display_mode),

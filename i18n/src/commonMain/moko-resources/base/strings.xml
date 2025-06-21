@@ -19,6 +19,23 @@
     <string name="delete_downloaded">Delete downloaded</string>
     <string name="history">History</string>
     <string name="scanlator">Scanlator</string>
+    
+    <!-- WebView / Custom Link dialog -->
+    <string name="action_custom_link">Enter Custom Link</string>
+    <string name="custom_link_title">Enter Link Custom</string>
+    <string name="custom_link_label">URL</string>
+    <string name="custom_link_placeholder">https://</string>
+    <string name="custom_link_open">Open</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="invalid_url">Invalid URL</string>
+
+
+
+val openLabel = stringResource(MR.strings.custom_link_open)
+        val cancelLabel = stringResource(MR.strings.action_cancel)
+        val urlLabel = stringResource(MR.strings.label_url)
+        val urlPlaceholder = "https://"
+        val invalidUrlMsg = stringResource(MR.strings.invalid_url)
 
     <!-- Screen titles -->
     <string name="label_more">More</string>
