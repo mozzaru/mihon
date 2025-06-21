@@ -37,9 +37,9 @@ fun BrowseSourceToolbar(
     onSettingsClick: () -> Unit,
     onSearch: (String) -> Unit,
     scrollBehavior: TopAppBarScrollBehavior? = null,
-    onCustomLinkClick: () -> Unit,
+    onCustomLinkClick: () -> Unit, // Menambahkan parameter untuk membuka dialog URL kustom
 ) {
-    // Avoid capturing unstable source in actions lambda
+    // Hindari menangkap sumber yang tidak stabil dalam aksi lambda
     val title = source?.name
     val isLocalSource = source is LocalSource
     val isConfigurableSource = source is ConfigurableSource
@@ -60,7 +60,7 @@ fun BrowseSourceToolbar(
                         add(
                             AppBar.OverflowAction(
                                 title = stringResource(MR.strings.custom_link_title),
-                                onClick = onCustomLinkClick,
+                                onClick = onCustomLinkClick, // Memanggil fungsi untuk membuka dialog URL kustom
                             ),
                         )
                         add(
