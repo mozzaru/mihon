@@ -8,7 +8,6 @@ import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import okhttp3.Cookie
 import java.util.concurrent.TimeUnit
 
 object HeadlessCloudflareBypass {
@@ -41,7 +40,24 @@ object HeadlessCloudflareBypass {
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, loadedUrl: String?) {
-                Log.d("MGKomik", "✅ Page finished loading: $loadedUrl")
+                Log.d("MGKomik", "✅ Page loaded: $loadedUrl")
+
+                // Inject search action
+                view?.evaluateJavascript("""
+                    (function() {
+                        var searchIcon = document.querySelector('.search-icon, .ion-ios-search-strong');
+                        if (searchIcon) searchIcon.click();
+                        setTimeout(function() {
+                            var input = document.querySelector('input[name="s"]');
+                            if (input) {
+                                input.value = "test";
+                                var form = input.closest('form');
+                                if (form) form.submit();
+                            }
+                        }, 500);
+                    })();
+                """.trimIndent(), null)
+
                 val cookie = cookieManager.getCookie(loadedUrl)
                 Log.d("MGKomik", "🍪 Cookies: $cookie")
                 if (cookie?.contains("cf_clearance=") == true && !called) {
@@ -49,7 +65,11 @@ object HeadlessCloudflareBypass {
                     Log.d("MGKomik", "🎉 cf_clearance obtained")
                     handler.postDelayed({
                         onSuccess(cookie)
-                        webView.destroy()
+                        try {
+                            view?.destroy()
+                        } catch (e: Exception) {
+                            Log.w("MGKomik", "⚠️ Error destroying WebView: ${e.message}")
+                        }
                     }, 1000)
                 }
             }

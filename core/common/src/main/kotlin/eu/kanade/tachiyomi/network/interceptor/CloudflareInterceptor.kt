@@ -1,19 +1,12 @@
 package eu.kanade.tachiyomi.network.interceptor
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.network.AndroidCookieJar
-import eu.kanade.tachiyomi.network.helper.bypassCloudflareWithSearch
-import eu.kanade.tachiyomi.util.system.isOutdated
-import eu.kanade.tachiyomi.util.system.setDefaultSettings
-import eu.kanade.tachiyomi.util.system.toast
+import eu.kanade.tachiyomi.network.helper.HeadlessCloudflareBypass
+import eu.kanade.tachiyomi.network.helper.WebViewBypassHelper
 import kotlinx.coroutines.runBlocking
 import okhttp3.Cookie
 import okhttp3.HttpUrl
@@ -30,19 +23,64 @@ class CloudflareInterceptor(
     private val cookieManager: AndroidCookieJar,
     private val defaultUserAgentProvider: () -> String,
     private val client: OkHttpClient,
-) : WebViewInterceptor(context, defaultUserAgentProvider) {
+) : Interceptor {
 
-    private val executor = ContextCompat.getMainExecutor(context)
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val url = request.url
 
-    override fun shouldIntercept(response: Response): Boolean {
-        if (response.code !in ERROR_CODES) return false
-        val serverHeader = response.header("Server") ?: return false
-        if (!SERVER_CHECK.any { serverHeader.contains(it, ignoreCase = true) }) return false
+        Log.d(TAG, "🌐 Request URL: $url")
+
+        var response = chain.proceed(request)
+        Log.d(TAG, "📥 Initial response code: ${response.code}")
+
+        if (!shouldIntercept(response)) {
+            Log.d(TAG, "✅ No Cloudflare challenge detected, proceeding normally")
+            return response
+        }
+
+        Log.w(TAG, "⚠️ Cloudflare challenge detected for ${url.host}")
+
+        if (hasValidClearanceCookie(url)) {
+            Log.d(TAG, "🍪 Valid cf_clearance cookie exists, retrying request")
+            response.close()
+            return chain.proceed(request)
+        }
+
+        Log.d(TAG, "🍪 cf_clearance missing or expired, starting bypass")
+        response.close()
+        cookieManager.remove(url, listOf("cf_clearance"), 0)
+
+        runBlocking {
+            try {
+                attemptBypass(url.toString())
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Cloudflare bypass failed: ${e.message}")
+                Toast.makeText(context, "Cloudflare bypass failed", Toast.LENGTH_LONG).show()
+                throw CloudflareBypassException()
+            }
+        }
+
+        Log.d(TAG, "🔁 Retrying request after bypass")
+        return chain.proceed(request)
+    }
+
+    private fun shouldIntercept(response: Response): Boolean {
+        if (response.code !in ERROR_CODES) {
+            Log.d(TAG, "🔎 Response code ${response.code} not in error codes")
+            return false
+        }
+        val serverHeader = response.header("Server") ?: ""
+        Log.d(TAG, "🔎 Server header: $serverHeader")
+        if (!SERVER_CHECK.any { serverHeader.contains(it, ignoreCase = true) }) {
+            Log.d(TAG, "🔎 Server header does not indicate Cloudflare")
+            return false
+        }
 
         val body = response.peekBody(Long.MAX_VALUE).string()
         val doc = Jsoup.parse(body, response.request.url.toString())
 
-        val challenge = listOf(
+        val challengeDetected = listOf(
             doc.selectFirst("form[action*=\"challenge\"]"),
             doc.selectFirst("script[data-type=\"challenge-form\"]"),
             doc.selectFirst("#challenge-form"),
@@ -58,111 +96,51 @@ class CloudflareInterceptor(
         val formCount = doc.select("form").size
         val bodyLen = body.length
 
-        return challenge || jsChallenge || metaRefresh || (formCount == 1 && bodyLen < 20_000)
-    }
+        Log.d(TAG, "🔎 Challenge: $challengeDetected, JS Challenge: $jsChallenge, Meta Refresh: $metaRefresh, Form count: $formCount, Body length: $bodyLen")
 
-    override fun intercept(chain: Interceptor.Chain, request: Request, response: Response): Response {
-        val url = request.url
-        if (hasValidClearanceCookie(url)) {
-            Log.d(TAG, "cf_clearance valid, proceeding without bypass")
-            response.close()
-            return chain.proceed(request)
-        }
-
-        Log.d(TAG, "cf_clearance missing or expired, attempting bypass")
-        response.close()
-        cookieManager.remove(url, listOf("cf_clearance"), 0)
-
-        try {
-            resolveWithWebView(request)
-        } catch (e: Exception) {
-            Log.w(TAG, "WebView bypass failed: ${e.message}, trying search injection")
-
-            runBlocking {
-                try {
-                    bypassCloudflareWithSearch(context, cookieManager, url.toString())
-                    Log.d(TAG, "Search injection bypass succeeded")
-                } catch (ex: Exception) {
-                    Log.e(TAG, "Search injection bypass failed: ${ex.message}")
-                    context.toast("Cloudflare bypass failed", Toast.LENGTH_LONG)
-                    throw CloudflareBypassException()
-                }
-            }
-        }
-
-        return chain.proceed(request)
-    }
-
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun resolveWithWebView(originalRequest: Request) {
-        val latch = CountDownLatch(1)
-        var webview: WebView? = null
-        var cloudflareBypassed = false
-        var isWebViewOutdated = false
-
-        val origRequestUrl = originalRequest.url.toString()
-        val headers = parseHeaders(originalRequest.headers)
-
-        executor.execute {
-            webview = createWebView(originalRequest).apply { setDefaultSettings() }
-
-            webview?.webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView, url: String) {
-                    val cookie = cookieManager.get(originalRequest.url).firstOrNull { it.name == "cf_clearance" }
-                    if (cookie != null && !cookie.hasExpired()) {
-                        Log.d(TAG, "cf_clearance obtained via WebView: ${cookie.value}")
-                        cloudflareBypassed = true
-                        latch.countDown()
-                    }
-                }
-
-                override fun onReceivedHttpError(
-                    view: WebView?,
-                    request: WebResourceRequest?,
-                    errorResponse: WebResourceResponse?,
-                ) {
-                    if (request?.isForMainFrame == true &&
-                        errorResponse?.statusCode !in ERROR_CODES
-                    ) {
-                        latch.countDown()
-                    }
-                }
-            }
-
-            webview?.loadUrl(origRequestUrl, headers)
-        }
-
-        latch.await(30, TimeUnit.SECONDS)
-
-        executor.execute {
-            if (!cloudflareBypassed) {
-                isWebViewOutdated = webview?.isOutdated() == true
-            }
-            webview?.apply {
-                stopLoading()
-                destroy()
-            }
-        }
-
-        if (!cloudflareBypassed) {
-            if (isWebViewOutdated) {
-                context.toast("WebView is outdated", Toast.LENGTH_LONG)
-            }
-            throw CloudflareBypassException()
-        }
+        return challengeDetected || jsChallenge || metaRefresh || (formCount == 1 && bodyLen < 20_000)
     }
 
     private fun hasValidClearanceCookie(url: HttpUrl): Boolean {
         val cookie = cookieManager.get(url).firstOrNull { it.name == "cf_clearance" }
         val valid = cookie != null && !cookie.hasExpired()
-        Log.d(TAG, "hasValidClearanceCookie for ${url.host}: $valid")
+        Log.d(TAG, "🍪 hasValidClearanceCookie for ${url.host}: $valid")
         return valid
+    }
+
+    private suspend fun attemptBypass(url: String) {
+        val latch = CountDownLatch(1)
+        var success = false
+
+        Log.d(TAG, "🚀 Starting headless bypass for: $url")
+        HeadlessCloudflareBypass.fetchClearanceCookie(
+            context,
+            url,
+            onSuccess = {
+                Log.d(TAG, "🎉 Headless bypass success: $it")
+                success = true
+                latch.countDown()
+            },
+            onFailure = {
+                Log.w(TAG, "⚠️ Headless bypass failed: ${it.message}")
+                latch.countDown()
+            }
+        )
+
+        val completed = latch.await(30, TimeUnit.SECONDS)
+        Log.d(TAG, "⏱ Headless bypass completed: $completed, success: $success")
+
+        if (!success) {
+            Log.d(TAG, "🌐 Falling back to WebView bypass")
+            WebViewBypassHelper.fetchClearanceCookie(context, url)
+            Log.d(TAG, "🎉 WebView bypass success")
+        }
     }
 
     private class CloudflareBypassException : Exception()
 
     companion object {
-        private const val TAG = "CloudflareInterceptor"
+        private const val TAG = "MGKomik"
         private val ERROR_CODES = listOf(403, 503)
         private val SERVER_CHECK = arrayOf("cloudflare-nginx", "cloudflare")
     }
