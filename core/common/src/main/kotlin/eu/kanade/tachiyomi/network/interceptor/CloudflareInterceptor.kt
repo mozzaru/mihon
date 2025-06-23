@@ -10,19 +10,18 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.network.AndroidCookieJar
+import eu.kanade.tachiyomi.network.helper.bypassCloudflareWithSearch
 import eu.kanade.tachiyomi.util.system.isOutdated
 import eu.kanade.tachiyomi.util.system.setDefaultSettings
-import eu.kanade.tachiyomi.network.helper.bypassCloudflareWithSearch
 import eu.kanade.tachiyomi.util.system.toast
+import kotlinx.coroutines.runBlocking
 import okhttp3.Cookie
 import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
-import tachiyomi.i18n.MR
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -65,23 +64,37 @@ class CloudflareInterceptor(
     override fun intercept(chain: Interceptor.Chain, request: Request, response: Response): Response {
         val url = request.url
         if (hasValidClearanceCookie(url)) {
-            Log.d("CloudflareInterceptor", "cf_clearance valid, proceeding without bypass")
+            Log.d(TAG, "cf_clearance valid, proceeding without bypass")
             response.close()
             return chain.proceed(request)
         }
 
-        Log.d("CloudflareInterceptor", "cf_clearance missing or expired, attempting bypass")
+        Log.d(TAG, "cf_clearance missing or expired, attempting bypass")
         response.close()
         cookieManager.remove(url, listOf("cf_clearance"), 0)
 
-        Log.d("CloudflareInterceptor", "Fallback to visible WebView UI")
-        val oldCookie = cookieManager.get(url).firstOrNull { it.name == "cf_clearance" }
-        resolveWithWebView(request, oldCookie)
+        try {
+            resolveWithWebView(request)
+        } catch (e: Exception) {
+            Log.w(TAG, "WebView bypass failed: ${e.message}, trying search injection")
+
+            runBlocking {
+                try {
+                    bypassCloudflareWithSearch(context, cookieManager, url.toString())
+                    Log.d(TAG, "Search injection bypass succeeded")
+                } catch (ex: Exception) {
+                    Log.e(TAG, "Search injection bypass failed: ${ex.message}")
+                    context.toast("Cloudflare bypass failed", Toast.LENGTH_LONG)
+                    throw CloudflareBypassException()
+                }
+            }
+        }
+
         return chain.proceed(request)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun resolveWithWebView(originalRequest: Request, oldCookie: Cookie?) {
+    private fun resolveWithWebView(originalRequest: Request) {
         val latch = CountDownLatch(1)
         var webview: WebView? = null
         var cloudflareBypassed = false
@@ -95,11 +108,9 @@ class CloudflareInterceptor(
 
             webview?.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String) {
-                    val cookie = cookieManager.get(origRequestUrl.toHttpUrl())
-                        .firstOrNull { it.name == "cf_clearance" }
-
-                    if (cookie != null && cookie != oldCookie && !cookie.hasExpired()) {
-                        Log.d("CloudflareInterceptor", "cf_clearance obtained via visible WebView: ${cookie.value}")
+                    val cookie = cookieManager.get(originalRequest.url).firstOrNull { it.name == "cf_clearance" }
+                    if (cookie != null && !cookie.hasExpired()) {
+                        Log.d(TAG, "cf_clearance obtained via WebView: ${cookie.value}")
                         cloudflareBypassed = true
                         latch.countDown()
                     }
@@ -127,40 +138,36 @@ class CloudflareInterceptor(
             if (!cloudflareBypassed) {
                 isWebViewOutdated = webview?.isOutdated() == true
             }
-
-            webview?.run {
+            webview?.apply {
                 stopLoading()
                 destroy()
             }
         }
 
         if (!cloudflareBypassed) {
-            try {
-                Log.w("CloudflareInterceptor", "WebView UI failed, trying bypassCloudflareWithSearch")
-                bypassCloudflareWithSearch(context, cookieManager, origRequestUrl)
-            } catch (e: Exception) {
-                if (isWebViewOutdated) {
-                    context.toast(MR.strings.information_webview_outdated, Toast.LENGTH_LONG)
-                }
-                Log.e("CloudflareInterceptor", "All Cloudflare bypass methods failed")
-                throw CloudflareBypassException()
+            if (isWebViewOutdated) {
+                context.toast("WebView is outdated", Toast.LENGTH_LONG)
             }
+            throw CloudflareBypassException()
         }
     }
 
     private fun hasValidClearanceCookie(url: HttpUrl): Boolean {
         val cookie = cookieManager.get(url).firstOrNull { it.name == "cf_clearance" }
         val valid = cookie != null && !cookie.hasExpired()
-        Log.d("CloudflareInterceptor", "hasValidClearanceCookie for ${url.host}: $valid")
+        Log.d(TAG, "hasValidClearanceCookie for ${url.host}: $valid")
         return valid
     }
 
     private class CloudflareBypassException : Exception()
+
+    companion object {
+        private const val TAG = "CloudflareInterceptor"
+        private val ERROR_CODES = listOf(403, 503)
+        private val SERVER_CHECK = arrayOf("cloudflare-nginx", "cloudflare")
+    }
 }
 
 fun Cookie.hasExpired(): Boolean {
     return this.expiresAt < System.currentTimeMillis()
 }
-
-private val ERROR_CODES = listOf(403, 503)
-private val SERVER_CHECK = arrayOf("cloudflare-nginx", "cloudflare")

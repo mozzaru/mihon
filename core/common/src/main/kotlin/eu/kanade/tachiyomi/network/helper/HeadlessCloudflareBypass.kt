@@ -8,20 +8,13 @@ import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.core.content.ContextCompat
-import eu.kanade.tachiyomi.network.AndroidCookieJar
 import okhttp3.Cookie
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 object HeadlessCloudflareBypass {
 
     private const val TIMEOUT_SECONDS = 30L
 
-    /**
-     * Menjalankan WebView tanpa UI untuk mendapatkan cookie cf_clearance.
-     */
     @SuppressLint("SetJavaScriptEnabled")
     fun fetchClearanceCookie(
         context: Context,
@@ -29,10 +22,11 @@ object HeadlessCloudflareBypass {
         onSuccess: (cookie: String) -> Unit,
         onFailure: (Throwable) -> Unit,
     ) {
-        Log.d("CloudflareInterceptor", "Starting headless bypass for: $url")
+        Log.d("MGKomik", "🚀 Starting headless bypass for: $url")
 
         val handler = Handler(Looper.getMainLooper())
         val webView = WebView(context)
+        var called = false
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -46,12 +40,13 @@ object HeadlessCloudflareBypass {
         cookieManager.flush()
 
         webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, url: String?) {
-                Log.d("CloudflareInterceptor", "Page finished loading: $url")
-                val cookie = cookieManager.getCookie(url)
-                Log.d("CloudflareInterceptor", "Cookies: $cookie")
-                if (cookie?.contains("cf_clearance") == true) {
-                    Log.d("CloudflareInterceptor", "cf_clearance obtained: $cookie")
+            override fun onPageFinished(view: WebView?, loadedUrl: String?) {
+                Log.d("MGKomik", "✅ Page finished loading: $loadedUrl")
+                val cookie = cookieManager.getCookie(loadedUrl)
+                Log.d("MGKomik", "🍪 Cookies: $cookie")
+                if (cookie?.contains("cf_clearance=") == true && !called) {
+                    called = true
+                    Log.d("MGKomik", "🎉 cf_clearance obtained")
                     handler.postDelayed({
                         onSuccess(cookie)
                         webView.destroy()
@@ -61,20 +56,23 @@ object HeadlessCloudflareBypass {
         }
 
         handler.postDelayed({
-            try {
-                webView.stopLoading()
-                webView.destroy()
-            } catch (e: Exception) {
-                Log.w("HeadlessBypass", "Error during timeout cleanup: ${e.message}")
+            if (!called) {
+                called = true
+                try {
+                    webView.stopLoading()
+                    webView.destroy()
+                } catch (e: Exception) {
+                    Log.w("MGKomik", "⚠️ Error during timeout cleanup: ${e.message}")
+                }
+                Log.w("MGKomik", "⏰ Timeout: cf_clearance not received in $TIMEOUT_SECONDS seconds")
+                onFailure(Exception("Timeout: Cloudflare clearance not received in $TIMEOUT_SECONDS seconds."))
             }
-            Log.w("HeadlessBypass", "Timeout: cf_clearance not received in $TIMEOUT_SECONDS seconds")
-            onFailure(Exception("Timeout: Cloudflare clearance not received in $TIMEOUT_SECONDS seconds."))
         }, TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS))
 
-        Log.d("CloudflareInterceptor", "Loading URL in headless WebView: $url")
+        Log.d("MGKomik", "🌐 Loading URL in headless WebView: $url")
         webView.loadUrl(url)
     }
-    
+
     private const val USER_AGENT =
         "Mozilla/5.0 (Linux; Android 11; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36"
 }
