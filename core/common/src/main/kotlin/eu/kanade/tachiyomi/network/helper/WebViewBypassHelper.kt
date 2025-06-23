@@ -6,10 +6,12 @@ import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.suspendCancellableCoroutine
-import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import java.util.concurrent.TimeUnit
 
 object WebViewBypassHelper {
 
@@ -22,59 +24,61 @@ object WebViewBypassHelper {
     suspend fun fetchClearanceCookie(
         context: Context,
         url: String,
-    ): String = suspendCancellableCoroutine { cont ->
-        Log.d(TAG, "🚀 WebView bypass start: $url")
+    ): String = withContext(Dispatchers.Main) {
+        suspendCancellableCoroutine { cont ->
+            Log.d(TAG, "🚀 WebView bypass start: $url")
 
-        val webView = WebView(context)
-        val cookieManager = CookieManager.getInstance()
-        var timeoutTriggered = false
+            val webView = WebView(context)
+            val cookieManager = CookieManager.getInstance()
+            var timeoutTriggered = false
 
-        webView.settings.apply {
-            javaScriptEnabled = true
-            domStorageEnabled = true
-            userAgentString = USER_AGENT
-        }
-
-        cookieManager.setAcceptCookie(true)
-        cookieManager.removeAllCookies(null)
-        cookieManager.flush()
-
-        val timeoutRunnable = Runnable {
-            if (!cont.isCompleted) {
-                timeoutTriggered = true
-                Log.w(TAG, "⏰ Timeout: cf_clearance not received in $TIMEOUT_SECONDS seconds")
-                cleanup(webView)
-                cont.resumeWithException(Exception("Timeout: Cloudflare clearance not received"))
+            webView.settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                userAgentString = USER_AGENT
             }
-        }
 
-        val handler = android.os.Handler(android.os.Looper.getMainLooper())
-        handler.postDelayed(timeoutRunnable, TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS))
+            cookieManager.setAcceptCookie(true)
+            cookieManager.removeAllCookies(null)
+            cookieManager.flush()
 
-        webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView?, loadedUrl: String?) {
-                if (loadedUrl == null) return
-
-                val cookie = cookieManager.getCookie(loadedUrl)
-                Log.d(TAG, "✅ Page loaded: $loadedUrl")
-                Log.d(TAG, "🍪 Cookies: $cookie")
-
-                if (cookie?.contains("cf_clearance=") == true && !cont.isCompleted) {
-                    handler.removeCallbacks(timeoutRunnable)
-                    Log.d(TAG, "🎉 cf_clearance obtained")
+            val timeoutRunnable = Runnable {
+                if (!cont.isCompleted) {
+                    timeoutTriggered = true
+                    Log.w(TAG, "⏰ Timeout: cf_clearance not received in $TIMEOUT_SECONDS seconds")
                     cleanup(webView)
-                    cont.resume(cookie)
+                    cont.resumeWithException(Exception("Timeout: Cloudflare clearance not received"))
                 }
             }
-        }
 
-        webView.loadUrl(url)
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            handler.postDelayed(timeoutRunnable, TimeUnit.SECONDS.toMillis(TIMEOUT_SECONDS))
 
-        cont.invokeOnCancellation {
-            if (!timeoutTriggered) {
-                Log.w(TAG, "⚠️ WebView bypass cancelled")
-                handler.removeCallbacks(timeoutRunnable)
-                cleanup(webView)
+            webView.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, loadedUrl: String?) {
+                    if (loadedUrl == null) return
+
+                    val cookie = cookieManager.getCookie(loadedUrl)
+                    Log.d(TAG, "✅ Page loaded: $loadedUrl")
+                    Log.d(TAG, "🍪 Cookies: $cookie")
+
+                    if (cookie?.contains("cf_clearance=") == true && !cont.isCompleted) {
+                        handler.removeCallbacks(timeoutRunnable)
+                        Log.d(TAG, "🎉 cf_clearance obtained")
+                        cleanup(webView)
+                        cont.resume(cookie)
+                    }
+                }
+            }
+
+            webView.loadUrl(url)
+
+            cont.invokeOnCancellation {
+                if (!timeoutTriggered) {
+                    Log.w(TAG, "⚠️ WebView bypass cancelled")
+                    handler.removeCallbacks(timeoutRunnable)
+                    cleanup(webView)
+                }
             }
         }
     }

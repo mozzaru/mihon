@@ -7,6 +7,8 @@ import androidx.core.content.ContextCompat
 import eu.kanade.tachiyomi.network.AndroidCookieJar
 import eu.kanade.tachiyomi.network.helper.HeadlessCloudflareBypass
 import eu.kanade.tachiyomi.network.helper.WebViewBypassHelper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
 import okhttp3.Cookie
 import okhttp3.HttpUrl
@@ -109,31 +111,33 @@ class CloudflareInterceptor(
     }
 
     private suspend fun attemptBypass(url: String) {
-        val latch = CountDownLatch(1)
-        var success = false
-
-        Log.d(TAG, "🚀 Starting headless bypass for: $url")
-        HeadlessCloudflareBypass.fetchClearanceCookie(
-            context,
-            url,
-            onSuccess = {
-                Log.d(TAG, "🎉 Headless bypass success: $it")
-                success = true
-                latch.countDown()
-            },
-            onFailure = {
-                Log.w(TAG, "⚠️ Headless bypass failed: ${it.message}")
-                latch.countDown()
+        withContext(Dispatchers.Main) {
+            val latch = CountDownLatch(1)
+            var success = false
+    
+            Log.d(TAG, "🚀 Starting headless bypass for: $url")
+            HeadlessCloudflareBypass.fetchClearanceCookie(
+                context,
+                url,
+                onSuccess = {
+                    Log.d(TAG, "🎉 Headless bypass success: $it")
+                    success = true
+                    latch.countDown()
+                },
+                onFailure = {
+                    Log.w(TAG, "⚠️ Headless bypass failed: ${it.message}")
+                    latch.countDown()
+                }
+            )
+    
+            val completed = latch.await(30, TimeUnit.SECONDS)
+            Log.d(TAG, "⏱ Headless bypass completed: $completed, success: $success")
+    
+            if (!success) {
+                Log.d(TAG, "🌐 Falling back to WebView bypass")
+                WebViewBypassHelper.fetchClearanceCookie(context, url)
+                Log.d(TAG, "🎉 WebView bypass success")
             }
-        )
-
-        val completed = latch.await(30, TimeUnit.SECONDS)
-        Log.d(TAG, "⏱ Headless bypass completed: $completed, success: $success")
-
-        if (!success) {
-            Log.d(TAG, "🌐 Falling back to WebView bypass")
-            WebViewBypassHelper.fetchClearanceCookie(context, url)
-            Log.d(TAG, "🎉 WebView bypass success")
         }
     }
 
