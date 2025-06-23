@@ -6,6 +6,8 @@ import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -16,9 +18,8 @@ import java.util.concurrent.TimeUnit
 object WebViewBypassHelper {
 
     private const val TAG = "MGKomik"
-    private const val TIMEOUT_SECONDS = 30L
-    private const val USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 11; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36"
+    private const val TIMEOUT_SECONDS = 15L
+    private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 
     @SuppressLint("SetJavaScriptEnabled")
     suspend fun fetchClearanceCookie(
@@ -28,9 +29,18 @@ object WebViewBypassHelper {
         suspendCancellableCoroutine { cont ->
             Log.d(TAG, "🚀 WebView bypass start: $url")
 
-            val webView = WebView(context)
+            val webView = WebView(context) // Deklarasi webView dipindah ke atas
             val cookieManager = CookieManager.getInstance()
             var timeoutTriggered = false
+
+            // Fungsi fail yang bisa mengakses webView
+            fun fail(message: String) {
+                if (!cont.isCompleted) {
+                    Log.w(TAG, message)
+                    cleanup(webView)
+                    cont.resumeWithException(Exception(message))
+                }
+            }
 
             webView.settings.apply {
                 javaScriptEnabled = true
@@ -67,6 +77,25 @@ object WebViewBypassHelper {
                         Log.d(TAG, "🎉 cf_clearance obtained")
                         cleanup(webView)
                         cont.resume(cookie)
+                    }
+                }
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    errorCode: Int,
+                    description: String?,
+                    failingUrl: String?
+                ) {
+                    fail("❌ WebView error [$errorCode]: $description")
+                }
+
+                override fun onReceivedHttpError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    errorResponse: WebResourceResponse?
+                ) {
+                    errorResponse?.let {
+                        fail("❌ HTTP error: ${it.statusCode}")
                     }
                 }
             }

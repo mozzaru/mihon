@@ -26,12 +26,19 @@ class CloudflareInterceptor(
     private val defaultUserAgentProvider: () -> String,
     private val client: OkHttpClient,
 ) : Interceptor {
+    
+    private val bypassCache = mutableSetOf<String>()
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val url = request.url
 
         Log.d(TAG, "🌐 Request URL: $url")
+        
+        if (bypassCache.contains(url.host)) {
+            Log.d(TAG, "♻️ Using cached bypass for ${url.host}")
+            return chain.proceed(request)
+        }
 
         var response = chain.proceed(request)
         Log.d(TAG, "📥 Initial response code: ${response.code}")
@@ -56,6 +63,7 @@ class CloudflareInterceptor(
         runBlocking {
             try {
                 attemptBypass(url.toString())
+                bypassCache.add(url.host) // Cache domain yang berhasil di-bypass
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Cloudflare bypass failed: ${e.message}")
                 Toast.makeText(context, "Cloudflare bypass failed", Toast.LENGTH_LONG).show()

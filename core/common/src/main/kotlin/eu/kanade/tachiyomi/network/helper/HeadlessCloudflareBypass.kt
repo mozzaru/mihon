@@ -43,13 +43,21 @@ object HeadlessCloudflareBypass {
                 override fun onPageFinished(view: WebView?, loadedUrl: String?) {
                     Log.d("MGKomik", "✅ Page loaded: $loadedUrl")
 
-                    // Inject search action
+                    // Inject JavaScript to handle Cloudflare challenge
                     view?.evaluateJavascript("""
                         (function() {
+                            // Try to find challenge form first
+                            var challengeForm = document.getElementById('challenge-form');
+                            if (challengeForm) {
+                                challengeForm.submit();
+                                return;
+                            }
+                            
+                            // Fallback to search method
                             var searchIcon = document.querySelector('.search-icon, .ion-ios-search-strong');
                             if (searchIcon) searchIcon.click();
                             setTimeout(function() {
-                                var input = document.querySelector('input[name=\"s\"]');
+                                var input = document.querySelector('input[name="s"]');
                                 if (input) {
                                     input.value = "test";
                                     var form = input.closest('form');
@@ -74,6 +82,19 @@ object HeadlessCloudflareBypass {
                         }, 1000)
                     }
                 }
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    errorCode: Int,
+                    description: String?,
+                    failingUrl: String?
+                ) {
+                    Log.e("MGKomik", "❌ WebView error [$errorCode]: $description")
+                    if (!called) {
+                        called = true
+                        onFailure(Exception("WebView error: $description"))
+                    }
+                }
             }
 
             handler.postDelayed({
@@ -95,6 +116,5 @@ object HeadlessCloudflareBypass {
         }
     }
 
-    private const val USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 11; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36"
+    private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
 }
