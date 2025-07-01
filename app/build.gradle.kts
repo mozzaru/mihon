@@ -22,7 +22,7 @@ android {
         applicationId = "app.mihon"
 
         versionCode = 11
-        versionName = "0.18.0"
+        versionName = "0.18.1"
 
         buildConfigField("String", "COMMIT_COUNT", "\"${getCommitCount()}\"")
         buildConfigField("String", "COMMIT_SHA", "\"${getGitSha()}\"")
@@ -30,9 +30,14 @@ android {
         buildConfigField("boolean", "UPDATER_ENABLED", "${Config.enableUpdater}")
 
         ndk {
-            abiFilters += supportedAbis
+            val abi = project.findProperty("abiFilter") as String?
+            if (abi != null) {
+                abiFilters.clear()
+                abiFilters.add(abi)
+            } else {
+                abiFilters += supportedAbis
+            }
         }
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
